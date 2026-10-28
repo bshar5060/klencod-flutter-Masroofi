@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const MasroofiApp());
@@ -26,6 +29,7 @@ class MasroofiApp extends StatelessWidget {
 }
 
 class TransactionItem {
+  final String id;
   final String title;
   final double amount;
   final String category;
@@ -33,12 +37,35 @@ class TransactionItem {
   final DateTime date;
 
   TransactionItem({
+    required this.id,
     required this.title,
     required this.amount,
     required this.category,
     required this.isIncome,
     required this.date,
   });
+
+  // تحويل المعاملة إلى نص قابل للحفظ
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'amount': amount,
+        'category': category,
+        'isIncome': isIncome,
+        'date': date.toIso8601String(),
+      };
+
+  // إعادة بناء المعاملة من النص المحفوظ
+  factory TransactionItem.fromJson(Map<String, dynamic> json) {
+    return TransactionItem(
+      id: json['id'] as String,
+      title: json['title'] as String,
+      amount: (json['amount'] as num).toDouble(),
+      category: json['category'] as String,
+      isIncome: json['isIncome'] as bool,
+      date: DateTime.parse(json['date'] as String),
+    );
+  }
 }
 
 class HomePage extends StatefulWidget {
@@ -49,7 +76,68 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  static const String _storageKey = 'masroofi_transactions_v1';
+
   final List<TransactionItem> transactions = [];
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTransactions();
+  }
+
+  // تحميل المعاملات المحفوظة عند فتح التطبيق
+  Future<void> _loadTransactions() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_storageKey);
+
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw) as List<dynamic>;
+        final loaded = <TransactionItem>[];
+
+        for (final entry in decoded) {
+          try {
+            loaded.add(
+              TransactionItem.fromJson(entry as Map<String, dynamic>),
+            );
+          } catch (_) {
+            // تجاهل أي سجل تالف بدل إيقاف التطبيق كله
+          }
+        }
+
+        transactions
+          ..clear()
+          ..addAll(loaded);
+      }
+    } catch (_) {
+      // إذا كانت البيانات تالفة يبدأ التطبيق بقائمة فارغة
+    }
+
+    if (!mounted) return;
+    setState(() {
+      isLoading = false;
+    });
+  }
+
+  // حفظ المعاملات الحالية على الجهاز
+  Future<void> _saveTransactions() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = jsonEncode(
+        transactions.map((item) => item.toJson()).toList(),
+      );
+      await prefs.setString(_storageKey, encoded);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('تعذّر حفظ البيانات على الجهاز'),
+        ),
+      );
+    }
+  }
 
   double get income => transactions
       .where((item) => item.isIncome)
@@ -188,14 +276,17 @@ class _HomePageState extends State<HomePage> {
                       return;
                     }
 
+                    final now = DateTime.now();
+
                     Navigator.pop(
                       dialogContext,
                       TransactionItem(
+                        id: now.microsecondsSinceEpoch.toString(),
                         title: title,
                         amount: amount,
                         category: category,
                         isIncome: isIncome,
-                        date: DateTime.now(),
+                        date: now,
                       ),
                     );
                   },
@@ -216,6 +307,14 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       transactions.insert(0, result);
     });
+    _saveTransactions();
+  }
+
+  void deleteTransaction(TransactionItem item) {
+    setState(() {
+      transactions.removeWhere((t) => t.id == item.id);
+    });
+    _saveTransactions();
   }
 
   @override
@@ -331,7 +430,8 @@ class _HomePageState extends State<HomePage> {
             SizedBox(
               height: 52,
               child: FilledButton.icon(
-                onPressed: addTransaction,
+                // نعطّل الزر حتى ينتهي تحميل البيانات المحفوظة
+                onPressed: isLoading ? null : addTransaction,
                 icon: const Icon(Icons.add),
                 label: const Text(
                   'إضافة معاملة جديدة',
@@ -354,7 +454,12 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const SizedBox(height: 12),
-            if (transactions.isEmpty)
+            if (isLoading)
+              const Padding(
+                padding: EdgeInsets.all(28),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (transactions.isEmpty)
               Container(
                 padding: const EdgeInsets.all(28),
                 decoration: BoxDecoration(
@@ -382,11 +487,9 @@ class _HomePageState extends State<HomePage> {
                 ),
               )
             else
-              ...transactions.asMap().entries.map((entry) {
-                final index = entry.key;
-                final item = entry.value;
-
+              ...transactions.map((item) {
                 return Card(
+                  key: ValueKey(item.id),
                   color: Colors.white,
                   margin: const EdgeInsets.only(bottom: 10),
                   child: ListTile(
@@ -433,11 +536,7 @@ class _HomePageState extends State<HomePage> {
                             padding: EdgeInsets.zero,
                             iconSize: 18,
                             tooltip: 'حذف المعاملة',
-                            onPressed: () {
-                              setState(() {
-                                transactions.removeAt(index);
-                              });
-                            },
+                            onPressed: () => deleteTransaction(item),
                             icon: const Icon(
                               Icons.delete_outline,
                               color: Colors.grey,
